@@ -1,0 +1,29 @@
+{
+  "name": "polymarket-copy-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --noEmit false --outDir dist",
+    "start": "node dist/index.js",
+    "dev": "ts-node-esm src/index.ts",
+    "lint": "eslint \"src/**/*.{ts,tsx}\""
+  },
+  "dependencies": {
+    "@polymarket/clob-client": "^2.2.1",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.5",
+    "ethers": "^5.7.2",
+    "p-retry": "^6.1.0",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "tslib": "^2.8.1"
+  }
+}
+
