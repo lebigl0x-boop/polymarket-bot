@@ -5,6 +5,7 @@ type SessionState = 'waiting_drawdown' | 'entered' | 'finished';
 
 interface CopySession {
   marketId: string;
+  tokenId: string;
   targetOutcome?: string;
   targetEntryPrice: number;
   detectedSize: number;
@@ -48,8 +49,12 @@ export class Trader {
   }
 
   private startSession(pos: Position, midpoint: number) {
+    const marketLabel = pos.title || pos.slug || pos.marketId;
+    const avgDisplay = pos.averagePrice !== undefined ? pos.averagePrice.toFixed(4) : 'n/a';
+    const sizeDisplay = pos.size.toFixed(2);
     const session: CopySession = {
       marketId: pos.marketId,
+      tokenId: pos.tokenId,
       targetOutcome: pos.outcome,
       targetEntryPrice: pos.averagePrice || midpoint,
       detectedSize: pos.size,
@@ -60,7 +65,7 @@ export class Trader {
       tp3: false
     };
     this.sessions.set(pos.marketId, session);
-    console.log('Nouveau trade détecté sur marché ouvert → attente drawdown');
+    console.log(`Nouveau trade détecté ${marketLabel} (${pos.outcome ?? '?'}) size ${sizeDisplay} @${avgDisplay} → attente drawdown`);
   }
 
   private async tryEnter(session: CopySession, midpoint: number) {
@@ -159,7 +164,7 @@ export class Trader {
     const newcomers = this.diffNewPositions(positions);
 
     for (const pos of newcomers) {
-      const ob = await this.client.getOrderBook(pos.marketId);
+      const ob = await this.client.getOrderBook(pos.tokenId);
       if (!ob || !this.isMarketOpen(ob.midpoint)) {
         console.log('Marché fermé → ignoré');
         continue;
@@ -168,7 +173,7 @@ export class Trader {
     }
 
     for (const session of this.sessions.values()) {
-      const ob = await this.client.getOrderBook(session.marketId);
+      const ob = await this.client.getOrderBook(session.tokenId);
       const midpoint = ob?.midpoint;
       if (!midpoint || !this.isMarketOpen(midpoint)) {
         console.log('Marché fermé → ignoré');

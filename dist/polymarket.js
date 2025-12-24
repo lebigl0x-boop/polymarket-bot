@@ -21,21 +21,31 @@ class PolymarketClient {
             const data = await res.json();
             if (!Array.isArray(data))
                 return [];
-            return data.map((p) => ({
-                marketId: String(p.marketId ?? p.market_id ?? ''),
-                size: Number(p.size ?? p.shares ?? 0),
-                averagePrice: p.averagePrice ?? p.price ?? p.avgPrice,
-                outcome: p.outcome ?? p.token?.outcome
-            })).filter(p => p.marketId && p.size > 0);
+            return data.map((p) => {
+                const endDateStr = p.endDate || p.end_time || p.expires;
+                const endTimestamp = endDateStr ? Date.parse(endDateStr) : undefined;
+                return {
+                    marketId: String(p.conditionId ?? p.marketId ?? p.market_id ?? ''),
+                    tokenId: String(p.asset ?? p.tokenId ?? p.asset_id ?? p.token?.token_id ?? ''),
+                    size: Number(p.size ?? p.amount ?? p.shares ?? 0),
+                    averagePrice: p.averagePrice ?? p.price ?? p.avgPrice,
+                    outcome: p.outcome ?? (typeof p.outcomeIndex === 'number' ? (p.outcomeIndex === 0 ? 'Up' : 'Down') : p.token?.outcome),
+                    title: p.title ?? p.question ?? '',
+                    slug: p.slug ?? '',
+                    endTimestamp,
+                    currentPrice: typeof p.curPrice === 'number' ? Number(p.curPrice) : undefined
+                };
+            }).filter(p => p.marketId && p.tokenId && p.size > 0)
+                .filter(p => !p.endTimestamp || p.endTimestamp > Date.now());
         }
         catch (err) {
             console.error('Erreur récupération positions :', err);
             return [];
         }
     }
-    async getOrderBook(marketId) {
+    async getOrderBook(tokenId) {
         try {
-            const ob = await this.clob.getOrderBook(marketId);
+            const ob = await this.clob.getOrderBook(tokenId);
             const bestBid = ob?.bids?.[0]?.price ? Number(ob.bids[0].price) : undefined;
             const bestAsk = ob?.asks?.[0]?.price ? Number(ob.asks[0].price) : undefined;
             const midpoint = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : undefined;
