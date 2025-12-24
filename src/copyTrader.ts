@@ -49,11 +49,7 @@ export class CopyTrader {
 
   private lastErrorMessage: string | undefined;
 
-  private activeMarketsCache = new Map<string, { isActive: boolean; timestamp: number }>();
-
   private lastStatusUpdate = 0;
-
-  private readonly CACHE_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 
   private isTradablePrice(price: number) {
     return price > 0.01 && price < 0.99;
@@ -66,7 +62,7 @@ export class CopyTrader {
     this.lastStatusUpdate = now;
     const positionsCount = Array.from(this.copied.values()).length;
     const pendingCount = this.pending.size;
-    const cacheSize = this.activeMarketsCache.size;
+    const cacheSize = 0; // Plus de cache pour les marchés actifs
 
     console.log(`\n📊 Statut ${new Date().toLocaleTimeString()}`);
     console.log(`   📈 Positions copiées: ${positionsCount}`);
@@ -75,46 +71,6 @@ export class CopyTrader {
     console.log(`   ✅ Bot actif: ${this.running ? "Oui" : "Non"}`);
   }
 
-  private async isMarketActive(marketId: string): Promise<boolean> {
-    const now = Date.now();
-    const cached = this.activeMarketsCache.get(marketId);
-
-    // Utiliser le cache si valide
-    if (cached && (now - cached.timestamp) < this.CACHE_DURATION_MS) {
-      return cached.isActive;
-    }
-
-    try {
-      // Vérifier si le marché existe et est actif
-      const response = await axios.get(`https://gamma-api.polymarket.com/markets/${marketId}`, {
-        timeout: 5000,
-      });
-
-      if (response.status !== 200) {
-        this.activeMarketsCache.set(marketId, { isActive: false, timestamp: now });
-        return false;
-      }
-
-      const marketData = response.data;
-
-      // Un marché est considéré actif s'il n'est pas fermé et a un orderbook
-      const isActive = marketData.closed === false &&
-                      marketData.active === true &&
-                      marketData.question !== undefined;
-
-      this.activeMarketsCache.set(marketId, { isActive, timestamp: now });
-      return isActive;
-
-    } catch (err) {
-      // Ne log que si debug activé pour éviter le spam
-      if (config.debug) {
-        console.log(`❌ Erreur vérification marché ${marketId.slice(0, 8)}...`);
-      }
-      // En cas d'erreur, on considère le marché comme inactif pour éviter les 404
-      this.activeMarketsCache.set(marketId, { isActive: false, timestamp: now });
-      return false;
-    }
-  }
 
   private lastSummarySnapshot: {
     positions: number;
@@ -137,6 +93,16 @@ export class CopyTrader {
     console.clear(); // Nettoie le terminal
     console.log("🚀 Polymarket Copy Trading Bot démarré");
     console.log("═══════════════════════════════════════");
+
+    // Vérifier si on est en dry run
+    const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
+    if (isDryRun) {
+      console.log("🔍 MODE DRY RUN: Surveillance seulement (pas d'ordres réels)");
+      console.log("💡 Pour passer en mode réel: définir PRIVATE_KEY");
+    } else {
+      console.log("💰 MODE RÉEL: Trading actif avec ordres réels");
+    }
+    console.log("");
 
     // Afficher la balance au démarrage
     console.log("🔍 Récupération de la balance USDC...");
@@ -271,13 +237,7 @@ export class CopyTrader {
     for (const pos of positions) {
       if (whitelist && !whitelist.includes(pos.marketId)) continue;
 
-      // Filtrer les marchés inactifs pour éviter les erreurs 404
-      if (!(await this.isMarketActive(pos.marketId))) {
-        if (config.debug) {
-          console.log(`⏭️  Marché ${pos.marketId.slice(0, 8)}... inactif → ignoré`);
-        }
-        continue;
-      }
+      // La vérification d'orderbook actif se fera lors de getMidPrice
 
       const key = this.posKey(pos);
       const peak = Math.max(pos.currentPrice, this.peaks.get(key) ?? pos.entryPrice);
@@ -303,47 +263,40 @@ export class CopyTrader {
       if (isNewOrIncrease && !this.pending.has(copyKey)) {
         const mid = await this.polymarket.getMidPrice(pos.marketId, pos.tokenId, pos.outcome);
         if (!this.isTradablePrice(mid.midpoint)) {
-          if (config.debug) {
-            log.debug(
-              {
-                wallet,
-                market: pos.marketId,
-                tokenId: pos.tokenId,
-                midpoint: mid.midpoint,
-              },
-              "Marché fermé ou sans OB → ignoré",
-            );
-          }
+          console.log(`⏭️ Marché fermé ou sans OB: ${pos.marketId.slice(0, 8)}... ${pos.outcome.toUpperCase()} → ignoré`);
         } else {
+          // Nouveau trade détecté sur marché ouvert avec orderbook actif
           this.pending.set(copyKey, {
             detectedAt: Date.now(),
             expiresAt: Date.now() + config.pendingWindowMs,
             wallet,
           });
-          console.log(`🎣 NOUVEAU TRADE DÉTECTÉ: ${pos.outcome.toUpperCase()} ${sizeIncrease.toFixed(4)} (+${((sizeIncrease/prevSize)*100).toFixed(1)}%)`);
+          console.log(`🎣 NOUVEAU TRADE DÉTECTÉ sur marché ouvert: ${pos.outcome.toUpperCase()} ${sizeIncrease.toFixed(4)} (+${((sizeIncrease/prevSize)*100).toFixed(1)}%)`);
           console.log(`   📊 Prix actuel: ${pos.currentPrice.toFixed(4)}, Midpoint: ${mid.midpoint.toFixed(4)}`);
-          console.log(`   ⏳ Attente drawdown ${config.drawdown.min * 100}%-${config.drawdown.max * 100}% (${Math.round(config.pendingWindowMs/1000/60)}min max)`);
+          console.log(`   ⏳ Attente drawdown ${config.drawdown.min * 100}%-${config.drawdown.max * 100}% depuis peak (${Math.round(config.pendingWindowMs/1000/60)}min max)`);
         }
       }
 
-      // Si un pending existe, on attend la fenêtre de drawdown ; sinon on n'entre pas (pas de snapshot)
+      // Si un pending existe, on attend la fenêtre de drawdown depuis le peak après entry
       if (this.pending.has(copyKey)) {
         const pending = this.pending.get(copyKey)!;
+        // Calcul du drawdown depuis le peak (prix max atteint depuis la détection du trade)
         const dd = peak > 0 ? (peak - pos.currentPrice) / peak : 0;
         const timeElapsed = Date.now() - pending.detectedAt;
         const timeRemaining = Math.max(0, pending.expiresAt - Date.now());
 
-        console.log(`⏳ ${pos.marketId.slice(0, 8)}... ${pos.outcome.toUpperCase()}: Drawdown=${(dd*100).toFixed(2)}% (target: ${config.drawdown.min*100}%-${config.drawdown.max*100}%)`);
-        console.log(`   ⏱️  Temps écoulé: ${Math.round(timeElapsed/1000)}s, restant: ${Math.round(timeRemaining/1000)}s`);
+        if (config.debug) {
+          console.log(`⏳ ${pos.marketId.slice(0, 8)}... ${pos.outcome.toUpperCase()}: Drawdown=${(dd*100).toFixed(2)}% (target: ${config.drawdown.min*100}%-${config.drawdown.max*100}%)`);
+          console.log(`   ⏱️  Temps écoulé: ${Math.round(timeElapsed/1000)}s, restant: ${Math.round(timeRemaining/1000)}s`);
+        }
 
         if (dd >= config.drawdown.min && dd <= config.drawdown.max) {
-          console.log(`🎯 DRAWDOWN ATTEINT: ${(dd*100).toFixed(2)}% - Exécution du trade!`);
+          console.log(`🎯 FENÊTRE DRAWDOWN ATTEINTE: ${(dd*100).toFixed(2)}% depuis peak - Entrée en copie!`);
           await this.tryEnterCopy(pos);
           this.pending.delete(copyKey);
         } else if (Date.now() >= pending.expiresAt) {
-          console.log(`⏰ TIMEOUT: Drawdown ${(dd*100).toFixed(2)}% non atteint dans le délai`);
+          console.log(`⏰ TIMEOUT: Drawdown ${(dd*100).toFixed(2)}% non atteint dans le délai (${Math.round(config.pendingWindowMs/1000/60)}min)`);
           this.pending.delete(copyKey);
-          if (config.debug) log.debug({ copyKey }, "Pending expiré (pas de drawdown)");
         }
         continue;
       }
@@ -411,26 +364,9 @@ export class CopyTrader {
       });
     } catch (err: any) {
       const reason = err?.message ?? `${err}`;
-      if (reason.startsWith("ABORT_OB")) {
-        log.info(
-          { market: pos.marketId, tokenId: pos.tokenId, reason },
-          "Orderbook absent (marché expiré/15m fermé ou pas encore listé) → ignoré",
-        );
-      } else if (reason.startsWith("ABORT_PRICE")) {
-        log.info(
-          { market: pos.marketId, tokenId: pos.tokenId, reason },
-          "Paramètre prix invalide → ignoré",
-        );
-      } else {
-        log.warn(
-          {
-            market: pos.marketId,
-            tokenId: pos.tokenId,
-            reason,
-          },
-          "Échec de création d'ordre",
-        );
-      }
+      const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
+      const modePrefix = isDryRun ? "[DRY RUN] " : "";
+      console.log(`${modePrefix}❌ ENTRY ÉCHOUÉE: ${pos.marketId.slice(0, 8)}... ${pos.outcome.toUpperCase()} - ${reason}`);
       this.lastErrorMessage = reason;
       return;
     }
@@ -449,9 +385,12 @@ export class CopyTrader {
       trailingArmed: false,
     });
 
-    console.log(`✅ ENTRÉE: ${pos.outcome.toUpperCase()} ${size.toFixed(2)} @ ${price.toFixed(4)} ($${usd.toFixed(2)})`);
+    const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
+    const modePrefix = isDryRun ? "[DRY RUN] " : "";
+    console.log(`${modePrefix}✅ ENTRY RÉUSSIE: ${pos.outcome.toUpperCase()} ${size.toFixed(4)} @ ${price.toFixed(4)} ($${usd.toFixed(2)})`);
     if (config.debug) {
-      console.log(`   🎯 Drawdown: ${(this.peaks.get(this.posKey(pos))! - pos.currentPrice) / this.peaks.get(this.posKey(pos))! * 100}%`);
+      const dd = (this.peaks.get(this.posKey(pos))! - pos.currentPrice) / this.peaks.get(this.posKey(pos))! * 100;
+      console.log(`   📊 Drawdown au moment entry: ${dd.toFixed(2)}%`);
     }
   }
 
@@ -524,7 +463,9 @@ export class CopyTrader {
       side: "sell",
     });
     state.remainingSize -= size;
-    console.log(`💰 TP ${percent * 100}%: ${size.toFixed(2)} ${state.outcome.toUpperCase()} @ ${state.maxSeenPrice.toFixed(4)}`);
+    const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
+    const modePrefix = isDryRun ? "[DRY RUN] " : "";
+    console.log(`${modePrefix}💰 TP ${percent * 100}%: ${size.toFixed(2)} ${state.outcome.toUpperCase()} @ ${state.maxSeenPrice.toFixed(4)}`);
     if (config.debug) {
       console.log(`   📈 Gain réalisé: ${((state.maxSeenPrice - state.entryPrice) * percent * 100).toFixed(2)}%`);
     }
@@ -548,7 +489,9 @@ export class CopyTrader {
       side: "sell",
     });
     this.copied.delete(this.posKey(state));
-    console.log(`🚪 ${reason.toUpperCase()}: Position ${state.outcome.toUpperCase()} clôturée @ ${state.maxSeenPrice.toFixed(4)}`);
+    const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
+    const modePrefix = isDryRun ? "[DRY RUN] " : "";
+    console.log(`${modePrefix}🚪 ${reason.toUpperCase()}: Position ${state.outcome.toUpperCase()} clôturée @ ${state.maxSeenPrice.toFixed(4)}`);
     if (config.debug) {
       const pnl = ((state.maxSeenPrice - state.entryPrice) / state.entryPrice * 100);
       console.log(`   💵 PnL final: ${pnl.toFixed(2)}%`);

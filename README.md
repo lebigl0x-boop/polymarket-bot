@@ -49,6 +49,26 @@ npm install
 ```
 
 ## Configuration
+
+### Mode Dry Run (Test sans risque)
+Pour tester la logique sans placer de vrais ordres :
+
+```bash
+# Sans private key = mode dry run automatique
+npm run build && npm start
+
+# Ou explicitement
+DRY_RUN=true npm run build && npm start
+```
+
+**En dry run :**
+- ✅ Récupération des vraies positions via Data API
+- ✅ Vérification des vrais orderbooks via CLOB
+- ✅ Simulation complète des ordres (logs détaillés)
+- ❌ Aucun ordre réel placé
+- ❌ Aucun fonds risqué
+
+### Mode Production
 Créez un fichier `.env` à la racine (non commité) :
 ```
 # Clés Polymarket (OBLIGATOIRE)
