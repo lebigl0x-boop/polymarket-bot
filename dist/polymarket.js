@@ -1,171 +1,84 @@
-import axios from "axios";
-import { ClobClient, Side } from "@polymarket/clob-client";
-import { Wallet } from "@ethersproject/wallet";
-import { config } from "./config.js";
-// Utiliser uniquement la Data API pour les positions (plus fiable selon les exigences)
-const DATA_API_URL = "https://data-api.polymarket.com/positions?user={wallet}&open=true";
-export class PolymarketService {
-    static async create() {
-        const isDryRun = process.env.DRY_RUN === 'true' || !process.env.PRIVATE_KEY;
-        if (isDryRun) {
-            console.log("🔗 [DRY RUN] Initialisation du service Polymarket (mode simulation - pas de private key)");
-            console.log("🔗 [DRY RUN] Utilisation des vraies APIs pour lecture, simulation pour écriture");
-            // En dry run, on crée un client sans wallet pour juste les lectures
-            const chainId = (process.env.CHAIN_ID ? parseInt(process.env.CHAIN_ID) : 137);
-            const client = new ClobClient(process.env.CLOB_API_URL || "https://clob.polymarket.com", chainId);
-            return new PolymarketService(client, null, true);
-        }
-        else {
-            console.log("🔗 Initialisation du service Polymarket avec CLOB client (mode réel)");
-            const wallet = new Wallet(process.env.PRIVATE_KEY);
-            const chainId = (process.env.CHAIN_ID ? parseInt(process.env.CHAIN_ID) : 137);
-            const client = new ClobClient(process.env.CLOB_API_URL || "https://clob.polymarket.com", chainId, wallet);
-            return new PolymarketService(client, wallet, false);
-        }
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.PolymarketClient = void 0;
+const clob_client_1 = require("@polymarket/clob-client");
+const wallet_1 = require("@ethersproject/wallet");
+const providers_1 = require("@ethersproject/providers");
+const config_1 = require("./config");
+class PolymarketClient {
+    constructor() {
+        const chainId = (process.env.CHAIN_ID ? Number(process.env.CHAIN_ID) : config_1.config.chainId);
+        const signer = config_1.privateKey ? new wallet_1.Wallet(config_1.privateKey, config_1.rpcUrl ? new providers_1.JsonRpcProvider(config_1.rpcUrl) : undefined) : undefined;
+        this.clob = new clob_client_1.ClobClient(config_1.config.clobApiUrl, chainId, signer);
     }
-    constructor(client, wallet, isDryRun) {
-        this.client = client;
-        this.wallet = wallet;
-        this.isDryRun = isDryRun;
-    }
-    async ensureUsdcAllowance(amount) {
-        if (!config.approveIfNeeded)
-            return;
-        if (this.isDryRun) {
-            console.log(`🔐 [DRY RUN] Allowance USDC vérifiée pour ${amount.toFixed(2)} USDC`);
-            return;
-        }
-        console.log(`🔐 Vérification allowance USDC pour ${amount.toFixed(2)} USDC`);
-        // Note: L'allowance est gérée automatiquement par le CLOB client
-    }
-    getWalletAddress() {
-        if (this.isDryRun) {
-            return "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"; // Adresse factice pour dry run
-        }
-        return this.wallet.address;
-    }
-    async getUsdcBalance() {
+    async getOpenPositions(wallet) {
+        const url = `${config_1.config.dataApiUrl}/positions?user=${wallet}&open=true`;
         try {
-            // Pour l'instant, retourner une valeur par défaut car l'API de balance n'est pas claire
-            // TODO: Implémenter la vraie récupération de balance quand l'API sera clarifiée
-            const usdBalance = 100.00; // Valeur par défaut pour les tests
-            console.log(`💰 Balance USDC: ${usdBalance.toFixed(2)} $`);
-            return usdBalance;
-        }
-        catch (err) {
-            console.error("❌ Erreur récupération balance USDC:", err);
-            return 100.00; // Valeur de fallback
-        }
-    }
-    async fetchOpenPositions(wallet) {
-        const url = DATA_API_URL.replace("{wallet}", wallet);
-        try {
-            const res = await axios.get(url, { timeout: 8000 });
-            const positions = res.data?.data ?? [];
-            if (!Array.isArray(positions) || positions.length === 0) {
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            if (!Array.isArray(data))
                 return [];
-            }
-            return positions.map((p) => ({
-                wallet,
-                marketId: p.conditionId ?? p.market ?? p.market_id ?? p.condition_id,
-                tokenId: p.asset ?? p.tokenId ?? p.token_id ?? "",
-                outcome: (p.outcomeIndex ?? p.outcome_id ?? p.outcome ?? 1) === 0 ? "yes" : "no",
-                size: Number(p.amount ?? p.shares ?? p.size ?? 0),
-                entryPrice: Number(p.avg_cost ?? p.entry_price ?? p.avgPrice ?? 0),
-                currentPrice: Number(p.price ?? p.mark_price ?? p.current_price ?? p.curPrice ?? 0),
-            }));
+            return data.map((p) => ({
+                marketId: String(p.marketId ?? p.market_id ?? ''),
+                size: Number(p.size ?? p.shares ?? 0),
+                averagePrice: p.averagePrice ?? p.price ?? p.avgPrice,
+                outcome: p.outcome ?? p.token?.outcome
+            })).filter(p => p.marketId && p.size > 0);
         }
         catch (err) {
-            console.error(`❌ Erreur récupération positions pour ${wallet}:`, err.message);
-            throw err;
+            console.error('Erreur récupération positions :', err);
+            return [];
         }
     }
-    async getMidPrice(marketId, tokenId, outcome) {
+    async getOrderBook(marketId) {
         try {
-            const orderbook = await this.client.getOrderBook(tokenId);
-            // Trouver les prix pour le token spécifique (YES/NO)
-            const bids = orderbook.bids ?? [];
-            const asks = orderbook.asks ?? [];
-            if (bids.length === 0 || asks.length === 0) {
-                // Marché sans orderbook actif
-                return {
-                    marketId,
-                    midpoint: 0,
-                    bid: 0,
-                    ask: 0,
-                    timestamp: Date.now(),
-                };
-            }
-            // Calculer le meilleur bid et ask
-            const bestBid = Math.max(...bids.map(b => parseFloat(b.price)));
-            const bestAsk = Math.min(...asks.map(a => parseFloat(a.price)));
-            const midpoint = (bestBid + bestAsk) / 2;
-            console.log(`📊 Midprice pour ${marketId.slice(0, 8)}... ${outcome}: ${midpoint.toFixed(4)} (bid: ${bestBid.toFixed(4)}, ask: ${bestAsk.toFixed(4)})`);
-            return {
-                marketId,
-                midpoint,
-                bid: bestBid,
-                ask: bestAsk,
-                timestamp: Date.now(),
-            };
+            const ob = await this.clob.getOrderBook(marketId);
+            const bestBid = ob?.bids?.[0]?.price ? Number(ob.bids[0].price) : undefined;
+            const bestAsk = ob?.asks?.[0]?.price ? Number(ob.asks[0].price) : undefined;
+            const midpoint = bestBid && bestAsk ? (bestBid + bestAsk) / 2 : undefined;
+            if (!midpoint)
+                return null;
+            return { bestBid, bestAsk, midpoint };
         }
         catch (err) {
-            // Gestion spécifique des erreurs 404 (marché fermé ou sans orderbook)
-            if (err.response?.status === 404 || err.message?.includes("No orderbook") || err.message?.includes("not found")) {
-                console.log(`⏭️ Marché fermé ou sans OB: ${marketId.slice(0, 8)}... → ignoré`);
-                return {
-                    marketId,
-                    midpoint: 0,
-                    bid: 0,
-                    ask: 0,
-                    timestamp: Date.now(),
-                };
+            const msg = err?.message || '';
+            if (msg.includes('No orderbook exists') || msg.includes('404')) {
+                console.log('Marché fermé → ignoré');
+                return null;
             }
-            console.error(`❌ Erreur récupération orderbook pour ${marketId.slice(0, 8)}...:`, err.message);
-            throw err;
+            console.error('Erreur orderbook :', err);
+            return null;
         }
     }
-    priceWithSlippage(price, side) {
-        const adj = side === "buy"
-            ? price * (1 + config.slippageBps / 10000)
-            : price * (1 - config.slippageBps / 10000);
-        return Number(adj.toFixed(4));
-    }
-    async placeOrder(order) {
-        const price = this.priceWithSlippage(order.price, order.side);
-        if (this.isDryRun) {
-            console.log(`📝 [DRY RUN] ${order.side.toUpperCase()} ${order.size.toFixed(4)} ${order.outcome.toUpperCase()} @ ${price.toFixed(4)} ($${(order.size * price).toFixed(2)})`);
-            // Simuler un délai réseau
-            await new Promise(resolve => setTimeout(resolve, 100));
-            const mockOrderId = `dry_run_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-            console.log(`✅ [DRY RUN] Ordre simulé avec ID: ${mockOrderId}`);
-            return mockOrderId;
-        }
+    async placeOrder(params) {
         try {
-            // Créer l'ordre en utilisant les utilitaires du CLOB
-            const tickSize = await this.client.getTickSize(order.tokenId);
+            const { marketId, side, price, size } = params;
+            if (!config_1.privateKey) {
+                console.warn('⚠️  Pas de PRIVATE_KEY → ordre non envoyé');
+                return null;
+            }
+            const tickSize = await this.clob.getTickSize(marketId);
             const userOrder = {
-                tokenID: order.tokenId,
-                price: price,
-                size: order.size,
-                side: order.side === "buy" ? Side.BUY : Side.SELL,
+                tokenID: marketId,
+                side: side === 'buy' ? clob_client_1.Side.BUY : clob_client_1.Side.SELL,
+                price,
+                size
             };
-            console.log(`📝 ${order.side.toUpperCase()} ${order.size.toFixed(4)} ${order.outcome.toUpperCase()} @ ${price.toFixed(4)} ($${(order.size * price).toFixed(2)})`);
-            // Créer et signer l'ordre
-            const signedOrder = await this.client.orderBuilder.buildOrder(userOrder, tickSize);
-            // Poster l'ordre
-            await this.client.postOrder(signedOrder);
-            console.log(`✅ Ordre placé avec succès`);
-            return `order_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const result = await this.clob.createAndPostOrder(userOrder, { tickSize });
+            return result || null;
         }
         catch (err) {
-            // Gestion spécifique des erreurs 404 (marché fermé)
-            if (err.response?.status === 404 || err.message?.includes("not found")) {
-                console.log(`⏭️ Marché fermé ou sans OB: ${order.marketId.slice(0, 8)}... → ordre ignoré`);
-                throw new Error("ABORT_OB: Marché fermé ou sans orderbook");
+            const msg = err?.message || '';
+            if (msg.includes('No orderbook exists') || msg.includes('404')) {
+                console.log('Marché fermé → ignoré');
+                return null;
             }
-            console.error(`❌ Échec placement ordre:`, err.message);
-            throw err;
+            console.error('Erreur envoi ordre :', err);
+            return null;
         }
     }
 }
+exports.PolymarketClient = PolymarketClient;

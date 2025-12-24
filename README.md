@@ -1,118 +1,43 @@
-# Polymarket Copy-Trading Bot (TypeScript)
+Tu es un expert en développement de bots trading sur Polymarket (Polygon, CLOB, APIs officielles 2025).
 
-Bot léger de copy-trading pour Polymarket utilisant le CLOB officiel pour les ordres et Gamma/Data pour les prix/positions. Il surveille des wallets, attend un drawdown de 5-10%, entre proportionnellement, prend des TP par paliers et applique un trailing stop.
+Objectif du bot (très précis) :
+Copy-trading d’un wallet actif sur les marchés Bitcoin Up or Down 15 minutes.
+- Détecter UNIQUEMENT un nouveau trade (nouveau buy ou augmentation significative de size).
+- Vérifier que le marché est ouvert (midpoint price entre 0.01 et 0.99 via CLOB).
+- Attendre que cette position nouvelle soit en drawdown de 5% à 10% (calculé depuis le prix peak après l'entry du trader).
+- Entrer en copie avec un montant fixe en USD (configurable).
+- Sortir avec :
+  - TP1 : +5% → vendre 33%
+  - TP2 : +10% → vendre 33%
+  - TP3 : +15% → vendre le reste
+  - Trailing stop de 3% après chaque TP atteint (sur le prix max).
+- Ignorer complètement les positions existantes au démarrage (snapshot).
+- Ignorer les marchés expirés ou sans orderbook (catch 404 proprement).
 
-## Structure
-- `src/index.ts` : point d'entrée, démarre le bot.
-- `src/config.ts` : toutes les configs (wallets copiés, drawdown, TP, trailing, sizing, debug).
-- `src/polymarket.ts` : wrapper Polymarket/Gamma + création d'ordres via `@polymarket/clob-client`.
-- `src/copyTrader.ts` : logique principale (monitoring, entrée différée, TP, trailing).
-- `src/types.ts` : types partagés.
-- `.env` : variables privées (à créer).
+APIs OBLIGATOIRES à utiliser (doc officielle 2025) :
+- Positions du wallet : https://data-api.polymarket.com/positions?user=WALLET&open=true
+- Orders, orderbook, midpoint price : @polymarket/clob-client (package npm officiel)
+- Doc complète : https://docs.polymarket.com/developers/gamma-markets-api/overview
 
-## Pré-requis
-- Node.js 18+
-- Un wallet Polygon avec du MATIC pour le gas et de l'USDC pour trader.
-- Clé privée et endpoint RPC Polygon (ex: Infura).
-- **Clés API Polymarket** (obligatoire pour trader)
+Ressources de bots existants comme inspiration (structure, polling, CLOB usage) :
+- https://github.com/Trust412/polymarket-copy-trading-bot-v1 (le plus populaire, polling positions, CLOB orders)
+- https://github.com/tommyreid622/polymarket-copy-trading-bot (production-ready, JSON tracking)
+- https://github.com/vladmeer/polymarket-copy-trading-bot (multi-wallets, slippage checks)
 
-## Obtenir les clés API Polymarket
+Best practices à respecter :
+- Node.js + TypeScript
+- Structure simple et claire : index.ts (lancement), config.ts (wallet, drawdown min/max, montant USD, TP/trailing), polymarket.ts (wrapper APIs), trader.ts (logique principale)
+- Polling toutes les 2 secondes (setInterval)
+- Try/catch sur toutes les API calls, surtout CLOB (404 "No orderbook exists" → log "Marché fermé → ignoré")
+- Logs très clairs en français :
+  "Nouveau trade détecté sur marché ouvert → attente drawdown"
+  "Drawdown 7.2% atteint → entry 100 USD"
+  "TP1 atteint → vente 33%"
+  "Trailing stop déclenché → sortie totale"
+  "Marché fermé → ignoré"
+- .env pour private key et RPC (jamais hardcodé)
+- Test en local uniquement (pas de VPS pour l'instant)
 
-1. Va sur [Polymarket Builder Profile](https://polymarket.com/settings?tab=builder)
-2. Crée une clé API dans la section "Builder Keys"
-3. Tu obtiendras : `apiKey`, `secret`, et `passphrase`
-
-## Vérification des fonds requis
-
-### USDC sur Polygon
-Pour trader sur Polymarket, vous devez avoir des USDC sur le réseau Polygon (pas Ethereum mainnet !).
-
-**Adresse USDC Polygon :** `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
-
-**Comment vérifier :**
-1. Allez sur [Polygonscan](https://polygonscan.com/)
-2. Collez votre adresse wallet dans la barre de recherche
-3. Vérifiez l'onglet "Token Holdings" pour voir vos USDC
-
-**Comment obtenir des USDC sur Polygon :**
-1. Via un bridge comme [Polygon Bridge](https://bridge.polygon.technology/)
-2. Ou directement depuis un exchange qui supporte Polygon (Binance, etc.)
-
-### MATIC pour les gas fees
-Vous devez aussi avoir du MATIC pour payer les frais de transaction.
-
-**Minimum recommandé :** 0.1 MATIC (~$0.05)
-
-## Installation
-```bash
-npm install
-```
-
-## Configuration
-
-### Mode Dry Run (Test sans risque)
-Pour tester la logique sans placer de vrais ordres :
-
-```bash
-# Sans private key = mode dry run automatique
-npm run build && npm start
-
-# Ou explicitement
-DRY_RUN=true npm run build && npm start
-```
-
-**En dry run :**
-- ✅ Récupération des vraies positions via Data API
-- ✅ Vérification des vrais orderbooks via CLOB
-- ✅ Simulation complète des ordres (logs détaillés)
-- ❌ Aucun ordre réel placé
-- ❌ Aucun fonds risqué
-
-### Mode Production
-Créez un fichier `.env` à la racine (non commité) :
-```
-# Clés Polymarket (OBLIGATOIRE)
-POLYMARKET_API_KEY=019b4cdc-ca26-7435-bd97-bdfd669422d9
-POLYMARKET_API_SECRET=votre_secret_ici
-POLYMARKET_API_PASSPHRASE=votre_passphrase_ici
-
-# Wallet (OBLIGATOIRE)
-PRIVATE_KEY=0xYOUR_PRIVATE_KEY
-RPC_URL=https://polygon-mainnet.infura.io/v3/YOUR_KEY
-
-# Optionnel
-CLOB_URL=https://clob.polymarket.com
-GAMMA_URL=https://gamma-api.polymarket.com/positions
-POSITIONS_URL=https://gamma-api.polymarket.com/positions?owner={wallet}&open=true
-```
-
-Modifiez `src/config.ts` :
-- `walletsToCopy`: wallets à suivre.
-- `drawdown`: bornes min/max (5%-10% par défaut).
-- `takeProfits`: paliers {target, percent}.
-- `trailing`: pourcentage du trailing sur le prix max atteint.
-- `sizing`: `balancePercent` (ex: 10% du solde, cap par trade) ou `fixedMax`.
-- `slippageBps`: tolérance de slippage sur les ordres.
-- `pollIntervalMs`: fréquence de monitoring (1-2s).
-- `debug`: active les logs détaillés.
-- `prettyLogs`: affiche les logs en clair via pino-pretty (par défaut true).
-- `pendingWindowMs`: délai max pour attendre un drawdown après détection d'un trade (5 min par défaut).
-
-## Lancement
-```bash
-npm run build
-npm start
-```
-ou en mode dev (ts-node) :
-```bash
-npm run dev
-```
-
-## Notes et sécurité
-- Le bot n'entre qu'après drawdown entre 5% et 10% (configurable).
-- TP: +5% (33%), +10% (33%), +15% (34%) puis trailing 3% armé après chaque TP.
-- Anti double-entry: une seule copie par market/outcome à la fois.
-- Retentes réseau automatiques (p-retry) et slippage paramétrable.
-- Vérifiez manuellement l'URL des APIs si Polymarket les fait évoluer.
-- Ne partagez jamais votre `.env`. Utilisez un wallet dédié au bot.
-
+Génère le bot complet, fichier par fichier, avec commentaires.
+Commence par config.ts, puis polymarket.ts, puis trader.ts, puis index.ts.
+À la fin, donne seulement la commande pour lancer : npm run build && npm start

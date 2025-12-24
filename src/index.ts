@@ -1,21 +1,19 @@
-import dotenv from "dotenv";
-import { config } from "./config.js";
-import { CopyTrader, createLogger } from "./copyTrader.js";
-import { PolymarketService } from "./polymarket.js";
-
-dotenv.config();
+import { config } from './config';
+import { PolymarketClient } from './polymarket';
+import { Trader } from './trader';
 
 async function main() {
-  const log = createLogger();
-  log.info({ wallets: config.walletsToCopy.map((w) => w.nickname ?? w.address) }, "Démarrage du bot");
-  const polymarket = await PolymarketService.create();
-  const bot = new CopyTrader(polymarket);
-  bot.start();
-  log.info("Bot lancé et en surveillance");
+  const client = new PolymarketClient();
+  const trader = new Trader(client);
+
+  console.log('Bot Polymarket prêt. Wallet suivi :', config.walletToCopy);
+  setInterval(() => {
+    trader.tick().catch((err) => console.error('Tick error', err));
+  }, config.pollingMs);
 }
 
 main().catch((err) => {
-  console.error("Erreur fatale", err);
+  console.error('Erreur critique', err);
   process.exit(1);
 });
 
